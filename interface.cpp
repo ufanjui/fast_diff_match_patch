@@ -203,6 +203,61 @@ diff_match_patch__match__impl(PyObject *self, PyObject *args, PyObject *kwargs)
     }
 }
 
+template <class Shim>
+static PyObject *
+diff_match_patch__patch_apply__impl(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    typename Shim::PY_ARG_TYPE patch_text, text;
+    float match_threshold = 0.5;
+    int match_distance = 1000;
+    float patch_delete_threshold = 0.5;
+    char format_spec[64];
+
+    static char *kwlist[] = {
+        strdup("patch_text"),
+        strdup("text"),
+        strdup("match_threshold"),
+        strdup("match_distance"),
+        strdup("patch_delete_threshold"),
+        NULL };
+
+    sprintf(format_spec, "%s%s|fif", Shim::PyArgFormat, Shim::PyArgFormat);
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, format_spec, kwlist,
+                                     &patch_text, &text,
+                                     &match_threshold, &match_distance,
+                                     &patch_delete_threshold))
+        return NULL;
+
+    auto patch_str = Shim::to_string(patch_text),
+         text_str = Shim::to_string(text);
+
+    typedef diff_match_patch<typename Shim::STL_STRING_TYPE> DMP;
+    DMP dmp;
+
+    dmp.Match_Threshold = match_threshold;
+    dmp.Match_Distance = match_distance;
+    dmp.Patch_DeleteThreshold = patch_delete_threshold;
+
+    typename DMP::Patches patches;
+    std::pair<typename Shim::STL_STRING_TYPE, std::vector<bool>> result;
+
+    Py_BEGIN_ALLOW_THREADS /* RELEASE THE GIL */
+    patches = dmp.patch_fromText(patch_str);
+    result = dmp.patch_apply(patches, text_str);
+    Py_END_ALLOW_THREADS /* ACQUIRE THE GIL */
+
+    PyObject *ret = PyTuple_New(2);
+    PyTuple_SetItem(ret, 0, Shim::from_string(result.first));
+
+    PyObject *bool_list = PyList_New(result.second.size());
+    for (size_t i = 0; i < result.second.size(); i++) {
+        PyList_SetItem(bool_list, i, PyBool_FromLong(result.second[i]));
+    }
+    PyTuple_SetItem(ret, 1, bool_list);
+
+    return ret;
+}
+
 // WRAPPER FUNCTIONS THAT DETERMINE WHETHER UNICODE OR BYTES ARE PASSED
 
 static PyObject *
@@ -229,6 +284,16 @@ diff_match_patch__match(PyObject *self, PyObject *args, PyObject *kwargs)
     return diff_match_patch__match__impl<BytesShim>(self, args, kwargs);
 }
 
+static PyObject *
+diff_match_patch__patch_apply(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    PyObject* first_arg;
+    if (PyTuple_Size(args) > 0 && (first_arg = PyTuple_GetItem(args, 0)))
+        if (PyUnicode_Check(first_arg))
+            return diff_match_patch__patch_apply__impl<UnicodeShim>(self, args, kwargs);
+    return diff_match_patch__patch_apply__impl<BytesShim>(self, args, kwargs);
+}
+
 // EXTENSION MODULE METADATA
 
 static PyMethodDef MyMethods[] = {
@@ -236,6 +301,8 @@ static PyMethodDef MyMethods[] = {
     "Compute the difference between two strings or bytes. Returns a list of tuples (OP, LEN)."},
     {"match", (PyCFunction)diff_match_patch__match, METH_VARARGS|METH_KEYWORDS,
     "Locate the best instance of 'pattern' in 'text' near 'loc'. Returns -1 if no match found."},
+    {"patch_apply", (PyCFunction)diff_match_patch__patch_apply, METH_VARARGS|METH_KEYWORDS,
+    "Apply a patch (in GNU diff format) to a text. Returns (patched_text, [applied_bools])."},
     {NULL, NULL, 0, NULL}        /* Sentinel */
 };
 
