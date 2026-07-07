@@ -19,7 +19,7 @@ struct BytesShim {
     }
 
     // Create PyString from underlying char array
-    static PyObject* from_string(std::string& value) {
+    static PyObject* from_string(const std::string& value) {
         return PyBytes_FromStringAndSize(value.data(), value.size());
     }
 };
@@ -258,6 +258,67 @@ diff_match_patch__patch_apply__impl(PyObject *self, PyObject *args, PyObject *kw
     return ret;
 }
 
+template <class Shim>
+static PyObject *
+diff_match_patch__patch_fromText__impl(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    typename Shim::PY_ARG_TYPE patch_text;
+
+    static char *kwlist[] = {
+        strdup("patch_text"),
+        NULL };
+
+    char format_spec[64];
+    sprintf(format_spec, "%s", Shim::PyArgFormat);
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, format_spec, kwlist,
+                                     &patch_text))
+        return NULL;
+
+    auto patch_str = Shim::to_string(patch_text);
+
+    typedef diff_match_patch<typename Shim::STL_STRING_TYPE> DMP;
+    DMP dmp;
+
+    typename DMP::Patches patches;
+    patches = dmp.patch_fromText(patch_str);
+
+    PyObject *ret = PyList_New(0);
+
+    PyObject *opcodes[3];
+    opcodes[0] = PyUnicode_FromString("-");
+    opcodes[1] = PyUnicode_FromString("+");
+    opcodes[2] = PyUnicode_FromString("=");
+
+    for (typename DMP::Patches::const_iterator p = patches.begin(); p != patches.end(); ++p) {
+        PyObject *dict = PyDict_New();
+        PyDict_SetItemString(dict, "start1", PyLong_FromLong(p->start1));
+        PyDict_SetItemString(dict, "length1", PyLong_FromLong(p->length1));
+        PyDict_SetItemString(dict, "start2", PyLong_FromLong(p->start2));
+        PyDict_SetItemString(dict, "length2", PyLong_FromLong(p->length2));
+
+        PyObject *diffs_list = PyList_New(0);
+        for (typename DMP::Diffs::const_iterator d = p->diffs.begin(); d != p->diffs.end(); ++d) {
+            PyObject *tuple = PyTuple_New(2);
+            Py_INCREF(opcodes[d->operation]);
+            PyTuple_SetItem(tuple, 0, opcodes[d->operation]);
+            PyTuple_SetItem(tuple, 1, Shim::from_string(d->text));
+            PyList_Append(diffs_list, tuple);
+            Py_DECREF(tuple);
+        }
+        PyDict_SetItemString(dict, "diffs", diffs_list);
+        Py_DECREF(diffs_list);
+
+        PyList_Append(ret, dict);
+        Py_DECREF(dict);
+    }
+
+    Py_DECREF(opcodes[0]);
+    Py_DECREF(opcodes[1]);
+    Py_DECREF(opcodes[2]);
+
+    return ret;
+}
+
 // WRAPPER FUNCTIONS THAT DETERMINE WHETHER UNICODE OR BYTES ARE PASSED
 
 static PyObject *
@@ -294,6 +355,16 @@ diff_match_patch__patch_apply(PyObject *self, PyObject *args, PyObject *kwargs)
     return diff_match_patch__patch_apply__impl<BytesShim>(self, args, kwargs);
 }
 
+static PyObject *
+diff_match_patch__patch_fromText(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    PyObject* first_arg;
+    if (PyTuple_Size(args) > 0 && (first_arg = PyTuple_GetItem(args, 0)))
+        if (PyUnicode_Check(first_arg))
+            return diff_match_patch__patch_fromText__impl<UnicodeShim>(self, args, kwargs);
+    return diff_match_patch__patch_fromText__impl<BytesShim>(self, args, kwargs);
+}
+
 // EXTENSION MODULE METADATA
 
 static PyMethodDef MyMethods[] = {
@@ -303,6 +374,8 @@ static PyMethodDef MyMethods[] = {
     "Locate the best instance of 'pattern' in 'text' near 'loc'. Returns -1 if no match found."},
     {"patch_apply", (PyCFunction)diff_match_patch__patch_apply, METH_VARARGS|METH_KEYWORDS,
     "Apply a patch (in GNU diff format) to a text. Returns (patched_text, [applied_bools])."},
+    {"patch_fromText", (PyCFunction)diff_match_patch__patch_fromText, METH_VARARGS|METH_KEYWORDS,
+    "Parse a GNU diff format patch string. Returns a list of patch dicts with start1/2, length1/2, diffs."},
     {NULL, NULL, 0, NULL}        /* Sentinel */
 };
 
