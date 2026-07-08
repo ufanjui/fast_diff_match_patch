@@ -120,5 +120,85 @@ class PatchFromTextTests(unittest.TestCase):
         self.assertTrue(all(applied))
 
 
+class DiffLinesTests(unittest.TestCase):
+    def test_one_line_modified(self):
+        text1 = "hello world\nthis is a test\nfoo bar\nend\n"
+        text2 = "hello world\nthis is MODIFIED\nfoo bar\nend\n"
+
+        diffs = fast_diff_match_patch.diff_lines(text1, text2)
+
+        self.assertEqual(diffs, [
+            ('=', 'hello world\n'),
+            ('-', 'this is a test\n'),
+            ('+', 'this is MODIFIED\n'),
+            ('=', 'foo bar\nend\n'),
+        ])
+
+    def test_one_line_inserted(self):
+        text1 = "hello world\nthis is a test\nfoo bar\nend\n"
+        text2 = "hello world\nthis is a test\nINSERTED\nfoo bar\nend\n"
+
+        diffs = fast_diff_match_patch.diff_lines(text1, text2)
+
+        self.assertEqual(diffs, [
+            ('=', 'hello world\nthis is a test\n'),
+            ('+', 'INSERTED\n'),
+            ('=', 'foo bar\nend\n'),
+        ])
+
+    def test_one_line_deleted(self):
+        text1 = "hello world\nthis is a test\nfoo bar\nend\n"
+        text2 = "hello world\nfoo bar\nend\n"
+
+        diffs = fast_diff_match_patch.diff_lines(text1, text2)
+
+        self.assertEqual(diffs, [
+            ('=', 'hello world\n'),
+            ('-', 'this is a test\n'),
+            ('=', 'foo bar\nend\n'),
+        ])
+
+    def test_empty_to_content(self):
+        diffs = fast_diff_match_patch.diff_lines("", "hello\nworld\n")
+        self.assertEqual(diffs, [
+            ('+', 'hello\nworld\n'),
+        ])
+
+    def test_content_to_empty(self):
+        diffs = fast_diff_match_patch.diff_lines("hello\nworld\n", "")
+        self.assertEqual(diffs, [
+            ('-', 'hello\nworld\n'),
+        ])
+
+    def test_identical(self):
+        text = "line1\nline2\nline3\n"
+        diffs = fast_diff_match_patch.diff_lines(text, text)
+        self.assertEqual(diffs, [('=', 'line1\nline2\nline3\n')])
+
+    def test_bytes(self):
+        text1 = b"hello\nworld\n"
+        text2 = b"hello\npython\n"
+
+        diffs = fast_diff_match_patch.diff_lines(text1, text2)
+
+        self.assertEqual(diffs, [
+            ('=', b'hello\n'),
+            ('-', b'world\n'),
+            ('+', b'python\n'),
+        ])
+
+    def test_no_trailing_newline(self):
+        text1 = "line1\nline2"
+        text2 = "line1\nline3"
+
+        diffs = fast_diff_match_patch.diff_lines(text1, text2)
+
+        self.assertEqual(diffs, [
+            ('=', 'line1\n'),
+            ('-', 'line2'),
+            ('+', 'line3'),
+        ])
+
+
 if __name__ == '__main__':
     unittest.main()

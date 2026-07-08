@@ -63,6 +63,19 @@ template <> struct diff_match_patch_traits<char32_t> : diff_match_patch_utf32_di
   static const char32_t tab = L'\t';
 };
 
+// Accessor to expose protected diff_linesToChars and Lines type.
+template <class stringT, class traits = diff_match_patch_traits<typename stringT::value_type>>
+struct DMPAccess : public diff_match_patch<stringT, traits> {
+    typedef diff_match_patch<stringT, traits> DMP;
+    using typename DMP::Lines;
+
+    static void diff_linesToChars(typename DMP::string_t &text1,
+                                  typename DMP::string_t &text2,
+                                  Lines& lineArray) {
+        DMP::diff_linesToChars(text1, text2, lineArray);
+    }
+};
+
 // COMPUTATIONAL FUNCTIONS
 
 template <class Shim>
@@ -319,6 +332,75 @@ diff_match_patch__patch_fromText__impl(PyObject *self, PyObject *args, PyObject 
     return ret;
 }
 
+template <class Shim>
+static PyObject *
+diff_match_patch__diff_lines__impl(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    typename Shim::PY_ARG_TYPE text1, text2;
+    char format_spec[64];
+
+    static char *kwlist[] = {
+        strdup("text1"),
+        strdup("text2"),
+        NULL };
+
+    sprintf(format_spec, "%s%s", Shim::PyArgFormat, Shim::PyArgFormat);
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, format_spec, kwlist,
+                                     &text1, &text2))
+        return NULL;
+
+    auto text1_str = Shim::to_string(text1),
+         text2_str = Shim::to_string(text2);
+
+    typedef typename Shim::STL_STRING_TYPE string_t;
+    typedef typename string_t::value_type char_t;
+    typedef diff_match_patch<string_t> DMP;
+    typedef DMPAccess<string_t> Access;
+
+    // Step 1+2: equivalent to diff_linesToChars
+    typename Access::Lines lines;
+    Access::diff_linesToChars(text1_str, text2_str, lines);
+
+    // Step 3: diff_main on encoded strings
+    DMP dmp;
+    typename DMP::Diffs diffs = dmp.diff_main(text1_str, text2_str, false);
+
+    // Step 4: decode — equivalent to diff_charsToLines (which is private)
+    for (typename DMP::Diffs::iterator d = diffs.begin(); d != diffs.end(); ++d) {
+        string_t text;
+        for (int y = 0; y < (int)d->text.length(); y++) {
+            typedef typename std::make_unsigned<char_t>::type uchar_t;
+            const auto& lp = lines[static_cast<size_t>(static_cast<uchar_t>(d->text[y]))];
+            text.append(lp.first, lp.second);
+        }
+        d->text.swap(text);
+    }
+
+    // Convert to Python list of (op, text) tuples
+    PyObject *ret = PyList_New(0);
+
+    PyObject *opcodes[3];
+    opcodes[0] = PyUnicode_FromString("-");
+    opcodes[1] = PyUnicode_FromString("+");
+    opcodes[2] = PyUnicode_FromString("=");
+
+    for (typename DMP::Diffs::const_iterator d = diffs.begin(); d != diffs.end(); ++d) {
+        typename DMP::Diff entry = *d;
+        PyObject *tuple = PyTuple_New(2);
+        Py_INCREF(opcodes[entry.operation]);
+        PyTuple_SetItem(tuple, 0, opcodes[entry.operation]);
+        PyTuple_SetItem(tuple, 1, Shim::from_string(entry.text));
+        PyList_Append(ret, tuple);
+        Py_DECREF(tuple);
+    }
+
+    Py_DECREF(opcodes[0]);
+    Py_DECREF(opcodes[1]);
+    Py_DECREF(opcodes[2]);
+
+    return ret;
+}
+
 // WRAPPER FUNCTIONS THAT DETERMINE WHETHER UNICODE OR BYTES ARE PASSED
 
 static PyObject *
@@ -365,6 +447,16 @@ diff_match_patch__patch_fromText(PyObject *self, PyObject *args, PyObject *kwarg
     return diff_match_patch__patch_fromText__impl<BytesShim>(self, args, kwargs);
 }
 
+static PyObject *
+diff_match_patch__diff_lines(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    PyObject* first_arg;
+    if (PyTuple_Size(args) > 0 && (first_arg = PyTuple_GetItem(args, 0)))
+        if (PyUnicode_Check(first_arg))
+            return diff_match_patch__diff_lines__impl<UnicodeShim>(self, args, kwargs);
+    return diff_match_patch__diff_lines__impl<BytesShim>(self, args, kwargs);
+}
+
 // EXTENSION MODULE METADATA
 
 static PyMethodDef MyMethods[] = {
@@ -376,6 +468,8 @@ static PyMethodDef MyMethods[] = {
     "Apply a patch (in GNU diff format) to a text. Returns (patched_text, [applied_bools])."},
     {"patch_fromText", (PyCFunction)diff_match_patch__patch_fromText, METH_VARARGS|METH_KEYWORDS,
     "Parse a GNU diff format patch string. Returns a list of patch dicts with start1/2, length1/2, diffs."},
+    {"diff_lines", (PyCFunction)diff_match_patch__diff_lines, METH_VARARGS|METH_KEYWORDS,
+    "Diff two texts at line granularity. Returns a list of (OP, text) tuples."},
     {NULL, NULL, 0, NULL}        /* Sentinel */
 };
 
