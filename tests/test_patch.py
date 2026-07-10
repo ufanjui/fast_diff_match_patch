@@ -1,8 +1,36 @@
 from __future__ import unicode_literals
 
+import random
+import string
 import unittest
 
 import fast_diff_match_patch
+
+
+def _make_lines(count, line_len=80):
+    return "\n".join(
+        "".join(random.choices(string.ascii_letters + string.digits, k=line_len))
+        for _ in range(count)
+    )
+
+
+def _mutate(text, change_pct=0.1):
+    lines = text.splitlines(keepends=True)
+    if not lines:
+        return text
+    n = max(1, int(len(lines) * change_pct))
+    indices = random.sample(range(len(lines)), min(n, len(lines)))
+    for i in indices:
+        op = random.choice(["mod", "del", "add"])
+        if op == "mod":
+            lines[i] = "".join(random.choices(string.ascii_letters, k=60)) + "\n"
+        elif op == "del":
+            lines[i] = ""
+        else:
+            lines.insert(
+                i, "".join(random.choices(string.ascii_letters, k=40)) + "\n"
+            )
+    return "".join(lines)
 
 
 class PatchApplyTests(unittest.TestCase):
@@ -75,6 +103,41 @@ class PatchApplyTests(unittest.TestCase):
             patch, b'123456789abcdefjkl')
         self.assertEqual(result, b'123456789abcghijkl')
         self.assertEqual(applied, [True])
+
+    def test_random_multipatch_roundtrip(self):
+        """Apply many random patches to random text and verify correctness."""
+        for _ in range(20):
+            new_text = _make_lines(500, 60)
+            old_text = _mutate(new_text, 0.2)
+            patch_text = fast_diff_match_patch.diff(
+                new_text, old_text, as_patch=True)
+            result, applied = fast_diff_match_patch.patch_apply(
+                patch_text, new_text)
+            self.assertEqual(result, old_text)
+            self.assertTrue(all(applied))
+
+    def test_random_multipatch_vs_reference(self):
+        """Compare patch_apply result against the Python diff_match_patch library."""
+        from diff_match_patch import diff_match_patch
+        dmp = diff_match_patch()
+
+        for _ in range(10):
+            new_text = _make_lines(500, 60)
+            old_text = _mutate(new_text, 0.2)
+
+            # Reference: dmp creates and applies patches
+            patches = dmp.patch_make(new_text, old_text)
+            patch_text = dmp.patch_toText(patches)
+            ref_result, ref_applied = dmp.patch_apply(patches, new_text)
+
+            # fast: fdmp parses the same patch text and applies
+            fast_result, fast_applied = fast_diff_match_patch.patch_apply(
+                patch_text, new_text)
+
+            self.assertEqual(ref_result, fast_result)
+            self.assertEqual(ref_result, old_text)
+            self.assertTrue(all(ref_applied))
+            self.assertTrue(all(fast_applied))
 
 
 class PatchFromTextTests(unittest.TestCase):

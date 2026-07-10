@@ -53,7 +53,7 @@ template <> struct diff_match_patch_traits<char32_t> : diff_match_patch_utf32_di
   static int to_int(const char32_t* s) {
     std::string narrowed;
     while (*s && *s < CHAR_MAX)
-        narrowed.append(static_cast<char>(*(s++)), 1);
+        narrowed.append(1, static_cast<char>(*(s++)));
     return static_cast<int>(std::strtol(narrowed.c_str(), NULL, 10));
   }
   static char32_t from_wchar(wchar_t c) { return (char32_t)c; }
@@ -245,18 +245,170 @@ diff_match_patch__patch_apply__impl(PyObject *self, PyObject *args, PyObject *kw
          text_str = Shim::to_string(text);
 
     typedef diff_match_patch<typename Shim::STL_STRING_TYPE> DMP;
+    typedef typename Shim::STL_STRING_TYPE string_t;
+    typedef typename string_t::value_type char_t;
     DMP dmp;
 
     dmp.Match_Threshold = match_threshold;
     dmp.Match_Distance = match_distance;
     dmp.Patch_DeleteThreshold = patch_delete_threshold;
 
-    typename DMP::Patches patches;
-    std::pair<typename Shim::STL_STRING_TYPE, std::vector<bool>> result;
+    std::pair<string_t, std::vector<bool>> result;
 
     Py_BEGIN_ALLOW_THREADS /* RELEASE THE GIL */
-    patches = dmp.patch_fromText(patch_str);
-    result = dmp.patch_apply(patches, text_str);
+
+    typename DMP::Patches patches = dmp.patch_fromText(patch_str);
+
+    if (!patches.empty()) {
+        // Deep copy patches
+        typename DMP::Patches patchesCopy(patches);
+
+        // Reimplement patch_addPadding + patch application here instead of
+        // calling dmp.patch_apply(), because the upstream patch_addPadding has
+        // a bug: in the "Add some padding on end of last diff" section it
+        // writes `patches.front()` where it should be `patches.back()`.
+        // The effect is that the trailing nullPadding is prepended to the
+        // *first* patch's diffs (giving it an extra 4 chars of context) while
+        // the *last* patch gets no trailing padding at all.  This corrupts
+        // length1/length2 on the first patch, which throws off the delta
+        // calculation and causes every subsequent patch_apply to fail.
+        // See: diff_match_patch.h patch_addPadding(), around line 2117.
+        short paddingLength = dmp.Patch_Margin;
+        string_t nullPadding;
+        for (short x = 1; x <= paddingLength; x++) {
+            nullPadding += (char_t)x;
+        }
+
+        // Bump all patches forward
+        for (typename DMP::Patches::iterator p = patchesCopy.begin(); p != patchesCopy.end(); ++p) {
+            p->start1 += paddingLength;
+            p->start2 += paddingLength;
+        }
+
+        // Add padding on start of first diff
+        typename DMP::Patch &firstPatch = patchesCopy.front();
+        typename DMP::Diffs &firstDiffs = firstPatch.diffs;
+        if (firstDiffs.empty() || firstDiffs.front().operation != DMP::EQUAL) {
+            firstDiffs.push_front(typename DMP::Diff(DMP::EQUAL, nullPadding));
+            firstPatch.start1 -= paddingLength;
+            firstPatch.start2 -= paddingLength;
+            firstPatch.length1 += paddingLength;
+            firstPatch.length2 += paddingLength;
+        } else if (paddingLength > (int)firstDiffs.front().text.length()) {
+            typename DMP::Diff &firstDiff = firstDiffs.front();
+            int extraLength = paddingLength - (int)firstDiff.text.length();
+            firstDiff.text = nullPadding.substr(firstDiff.text.length(), extraLength) + firstDiff.text;
+            firstPatch.start1 -= extraLength;
+            firstPatch.start2 -= extraLength;
+            firstPatch.length1 += extraLength;
+            firstPatch.length2 += extraLength;
+        }
+
+        // Add padding on end of LAST diff (correctly using back())
+        typename DMP::Patch &lastPatch = patchesCopy.back();
+        typename DMP::Diffs &lastDiffs = lastPatch.diffs;
+        if (lastDiffs.empty() || lastDiffs.back().operation != DMP::EQUAL) {
+            lastDiffs.push_back(typename DMP::Diff(DMP::EQUAL, nullPadding));
+            lastPatch.length1 += paddingLength;
+            lastPatch.length2 += paddingLength;
+        } else if (paddingLength > (int)lastDiffs.back().text.length()) {
+            typename DMP::Diff &lastDiff = lastDiffs.back();
+            int extraLength = paddingLength - (int)lastDiff.text.length();
+            lastDiff.text += nullPadding.substr(0, extraLength);
+            lastPatch.length1 += extraLength;
+            lastPatch.length2 += extraLength;
+        }
+
+        // Add padding to text
+        text_str = nullPadding + text_str + nullPadding;
+
+        // Split max patches
+        dmp.patch_splitMax(patchesCopy);
+
+        // Apply each patch
+        int x = 0;
+        int delta = 0;
+        result.second.resize(patchesCopy.size());
+        string_t text1, text2;
+
+        for (typename DMP::Patches::const_iterator cur_patch = patchesCopy.begin();
+             cur_patch != patchesCopy.end(); ++cur_patch) {
+            int expected_loc = cur_patch->start2 + delta;
+            text1 = DMP::diff_text1(cur_patch->diffs);
+            int start_loc;
+            int end_loc = -1;
+
+            if ((int)text1.length() > dmp.Match_MaxBits) {
+                start_loc = dmp.match_main(text_str,
+                    text1.substr(0, dmp.Match_MaxBits), expected_loc);
+                if (start_loc != -1) {
+                    end_loc = dmp.match_main(text_str,
+                        text1.substr(text1.length() - dmp.Match_MaxBits),
+                        expected_loc + (int)text1.length() - dmp.Match_MaxBits);
+                    if (end_loc == -1 || start_loc >= end_loc) {
+                        start_loc = -1;
+                    }
+                }
+            } else {
+                start_loc = dmp.match_main(text_str, text1, expected_loc);
+            }
+
+            if (start_loc == -1) {
+                result.second[x] = false;
+                delta -= cur_patch->length2 - cur_patch->length1;
+            } else {
+                result.second[x] = true;
+                delta = start_loc - expected_loc;
+                if (end_loc == -1) {
+                    text2 = text_str.substr(start_loc, text1.length());
+                } else {
+                    text2 = text_str.substr(start_loc,
+                        end_loc + dmp.Match_MaxBits - start_loc);
+                }
+                if (text1 == text2) {
+                    text_str = text_str.substr(0, start_loc)
+                        + DMP::diff_text2(cur_patch->diffs)
+                        + text_str.substr(start_loc + text1.length());
+                } else {
+                    typename DMP::Diffs diffs = dmp.diff_main(text1, text2, false);
+                    if ((int)text1.length() > dmp.Match_MaxBits
+                        && DMP::diff_levenshtein(diffs) / (float)text1.length()
+                            > dmp.Patch_DeleteThreshold) {
+                        result.second[x] = false;
+                    } else {
+                        DMP::diff_cleanupSemanticLossless(diffs);
+                        int index1 = 0;
+                        for (typename DMP::Diffs::const_iterator d = cur_patch->diffs.begin();
+                             d != cur_patch->diffs.end(); ++d) {
+                            if (d->operation != DMP::EQUAL) {
+                                int index2 = DMP::diff_xIndex(diffs, index1);
+                                if (d->operation == DMP::INSERT) {
+                                    text_str = text_str.substr(0, start_loc + index2)
+                                        + d->text + text_str.substr(start_loc + index2);
+                                } else if (d->operation == DMP::DELETE) {
+                                    text_str = text_str.substr(0, start_loc + index2)
+                                        + text_str.substr(start_loc
+                                            + DMP::diff_xIndex(diffs, index1 + (int)d->text.length()));
+                                }
+                            }
+                            if (d->operation != DMP::DELETE) {
+                                index1 += (int)d->text.length();
+                            }
+                        }
+                    }
+                }
+            }
+            x++;
+        }
+
+        // Strip the padding off
+        result.first = text_str.substr(nullPadding.length(),
+            text_str.length() - 2 * nullPadding.length());
+    } else {
+        result.first = text_str;
+        result.second.clear();
+    }
+
     Py_END_ALLOW_THREADS /* ACQUIRE THE GIL */
 
     PyObject *ret = PyTuple_New(2);
